@@ -95,7 +95,7 @@ func loadDir(r multitemplate.Renderer, path string, widgets []string) {
 	}
 }
 
-func loadTemplates() multitemplate.Renderer {
+func LoadTemplates() multitemplate.Renderer {
 	r := multitemplate.NewRenderer()
 	widgets, err := filepath.Glob(fmt.Sprintf("%s/%s/*.%s", templatesPath, widgetDir, tempExt))
 	if err != nil {
