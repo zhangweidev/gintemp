@@ -80,7 +80,7 @@ func loadDir(r multitemplate.Renderer, path string, widgets []string) {
 				page_layout := fmt.Sprintf("%s/%s/layout.html", templatesPath, layoutDir)
 
 				if v, ok := layout_map[filename]; ok {
-					page_layout = fmt.Sprintf("%s/%s/%s.%s", templatesPath, layoutDir, v, tempExt)
+					page_layout = fmt.Sprintf("%s/%s/%s%s", templatesPath, layoutDir, v, tempExt)
 				}
 
 				var s []string
