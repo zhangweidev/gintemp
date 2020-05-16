@@ -1,9 +1,16 @@
 package main
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/xxiu/gintemp"
 )
+
+func Hello(c *gin.Context) {
+
+	c.HTML(http.StatusOK, "auth/login.html", gin.H{})
+}
 
 func main() {
 	r := gin.Default()
@@ -15,5 +22,8 @@ func main() {
 			"message": "pong",
 		})
 	})
+
+	r.GET("/login", Hello)
+
 	r.Run() // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
 }
