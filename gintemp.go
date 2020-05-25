@@ -58,7 +58,6 @@ func loadDir(r multitemplate.Renderer, path string, widgets []string) {
 
 	views, _ := filepath.Glob(path + "/*")
 	for _, view := range views {
-		log.Println(view)
 		if fileinfo, _ := os.Stat(view); fileinfo.IsDir() {
 			loadDir(r, view, widgets)
 		} else {
@@ -97,10 +96,13 @@ func loadDir(r multitemplate.Renderer, path string, widgets []string) {
 
 func LoadTemplates() multitemplate.Renderer {
 	r := multitemplate.NewRenderer()
-	widgets, err := filepath.Glob(fmt.Sprintf("%s/%s/*.%s", templatesPath, widgetDir, tempExt))
+	widgets, err := filepath.Glob(fmt.Sprintf("%s/%s/*%s", templatesPath, widgetDir, tempExt))
 	if err != nil {
 		panic(err.Error())
 	}
+
+	log.Printf("load widgets:%v", widgets)
+
 	loadDir(r, fmt.Sprintf("%s/%s", templatesPath, viewDir), widgets)
 	return r
 
