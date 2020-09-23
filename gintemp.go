@@ -11,97 +11,123 @@ import (
 	"github.com/gin-contrib/multitemplate"
 )
 
-/**
-多模板加载
-为模板扩展了一个 layout 函数 ，用于指定当前页面的主模板，
-页面由 当前页，主模板，widgets 组成 主模板不指定默认为 layouts/layout.html
+/** 多模板加载
+为模板扩展了一个 layout 函数 ，用于指定当前页面的主模板
+页面由 当前页面、模版、和 widgets 组成
+
+在页面头上加上
+
+{{layout "layout" .}}
+
+实现模版的使用， 引号内的为模版名称。
+
 */
 
-var (
-	templatesPath string = "./templates" // templates default dir
-	viewDir       string = "views"
-	layoutDir     string = "layouts"
-	widgetDir     string = "widgets"
-	tempExt       string = ".html"
-	layout_map    map[string]string
-)
-
-// 设置模版位置
-func TemplateDir(path string) {
-	templatesPath = path
-}
-
-type layout_object struct {
+type LayoutObject struct {
 	Name string
 }
 
-func init() {
-	layout_map = make(map[string]string)
+type GinTemp struct {
+	TempPath  string            // 模版路径
+	viewDir   string            // 视图文件夹
+	layoutDir string            // 布局路径
+	widgetDir string            // 组件路径
+	ext       string            // 扩展名
+	layoutMap map[string]string // 页面与模版的对应
 }
 
-func layout(name string, layout_name interface{}) string {
-	switch layout_name.(type) {
-	case layout_object:
-		lay_obj := layout_name.(layout_object)
-		layout_map[lay_obj.Name] = name
+type Option func(*GinTemp)
+
+func WithTempPath(path string) Option {
+	return func(g *GinTemp) {
+		g.TempPath = path
+	}
+}
+
+func NewGinTemp(options ...Option) *GinTemp {
+	gintemp := &GinTemp{}
+	gintemp.TempPath = "templates"
+	gintemp.viewDir = "views"
+	gintemp.layoutDir = "layouts"
+	gintemp.widgetDir = "widgets"
+	gintemp.ext = ".html"
+	gintemp.layoutMap = make(map[string]string)
+
+	for _, option := range options {
+		option(gintemp)
+	}
+
+	return gintemp
+}
+
+func (g *GinTemp) layoutFunc(name string, layout interface{}) string {
+
+	obj, ok := layout.(LayoutObject)
+	if ok {
+		g.layoutMap[obj.Name] = name
 	}
 	return ""
 }
 
-// 加载目录
-func loadDir(r multitemplate.Renderer, path string, widgets []string) {
-	// 为模板注入一个 layout 函数 ，定义了一个 layout_object ，用来提前获取 layout 配置的模板名称
-	// 真实加载时，传入的内容不为  layout_object ，从而实现由模板传入名字。
+//
+
+func (g *GinTemp) Load() multitemplate.Renderer {
+	r := multitemplate.NewRenderer()
 	funcMap := template.FuncMap{
-		"layout": layout,
+		"layout": g.layoutFunc,
 	}
 
-	views, _ := filepath.Glob(path + "/*")
+	widgets := g.loadFile(filepath.Join(g.TempPath, g.widgetDir))
+	fmt.Println("widgets", widgets)
+	views := g.loadFile(filepath.Join(g.TempPath, g.viewDir))
+	fmt.Println("views", views)
+
 	for _, view := range views {
-		log.Println(view)
-		if fileinfo, _ := os.Stat(view); fileinfo.IsDir() {
-			loadDir(r, view, widgets)
-		} else {
-			// 直接加载
-			if filepath.Ext(view) == tempExt {
 
-				filename := filepath.Base(view) //获取文件名
-
-				lay_obj := layout_object{
-					Name: filename,
-				}
-
-				t := template.Must(template.New(filename).Funcs(funcMap).ParseFiles(view))
-				var buf bytes.Buffer
-				t.Execute(&buf, lay_obj)
-
-				file_Rel, _ := filepath.Rel(fmt.Sprintf("%s/%s", templatesPath, viewDir), view)
-
-				page_layout := fmt.Sprintf("%s/%s/layout.html", templatesPath, layoutDir)
-
-				if v, ok := layout_map[filename]; ok {
-					page_layout = fmt.Sprintf("%s/%s/%s.%s", templatesPath, layoutDir, v, tempExt)
-				}
-
-				var s []string
-				s = append(s, page_layout)
-				s = append(s, widgets...)
-				s = append(s, view)
-				r.AddFromFilesFuncs(file_Rel, funcMap, s...)
-				log.Printf("template Load:%s \n", file_Rel)
-			}
-
+		name, _ := filepath.Rel(fmt.Sprintf("%s/%s", g.TempPath, g.viewDir), view)
+		layoutObject := LayoutObject{
+			Name: name,
 		}
+		t := template.Must(template.New(name).Funcs(funcMap).ParseFiles(view))
+		var buf bytes.Buffer
+		t.Execute(&buf, layoutObject)
+
+		layoutPath := fmt.Sprintf("%s/%s/layout.html", g.TempPath, g.layoutDir)
+		if v, ok := g.layoutMap[name]; ok {
+			layoutPath = fmt.Sprintf("%s/%s/%s.%s", g.TempPath, g.layoutDir, v, g.ext)
+		}
+
+		var s []string
+		s = append(s, layoutPath)
+		s = append(s, widgets...)
+		s = append(s, view)
+		r.AddFromFilesFuncs(name, funcMap, s...)
+		log.Printf("template Load:%s \n", name)
+
 	}
+	return r
+}
+
+// 加载文件
+func (g *GinTemp) loadFile(dir string) []string {
+
+	files, _ := filepath.Glob(fmt.Sprintf("%s/*", dir))
+	cfiles := []string{}
+	for _, f := range files {
+		if finfo, _ := os.Stat(f); finfo.IsDir() {
+			files_child := g.loadFile(f)
+			cfiles = append(cfiles, files_child...)
+		} else {
+			if filepath.Ext(f) == g.ext {
+				cfiles = append(cfiles, f)
+			}
+		}
+
+	}
+	return cfiles
 }
 
 func LoadTemplates() multitemplate.Renderer {
-	r := multitemplate.NewRenderer()
-	widgets, err := filepath.Glob(fmt.Sprintf("%s/%s/*.%s", templatesPath, widgetDir, tempExt))
-	if err != nil {
-		panic(err.Error())
-	}
-	loadDir(r, fmt.Sprintf("%s/%s", templatesPath, viewDir), widgets)
-	return r
-
+	gintemp := NewGinTemp()
+	return gintemp.Load()
 }
