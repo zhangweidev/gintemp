@@ -22,11 +22,7 @@ import (
 实现模版的使用， 引号内的为模版名称。
 
 */
-
-var (
-	layout_map    map[string]string
-)
-
+ 
 type LayoutObject struct {
 	Name string
 }
@@ -50,7 +46,7 @@ func WithTempPath(path string) Option {
 
 func NewGinTemp(options ...Option) *GinTemp {
 	gintemp := &GinTemp{}
-	gintemp.TempPath = "templates"
+	gintemp.TempPath = "./templates"
 	gintemp.viewDir = "views"
 	gintemp.layoutDir = "layouts"
 	gintemp.widgetDir = "widgets"
@@ -64,12 +60,11 @@ func NewGinTemp(options ...Option) *GinTemp {
 	return gintemp
 }
 
-func LayoutFunc(name string, layout interface{}) string {
+func (g *GinTemp)LayoutFunc(name string, layout interface{}) string {
 
 	obj, ok := layout.(LayoutObject)
-	fmt.Println("obj",obj,ok)
-	if ok {
-		layout_map[obj.Name] = name
+ 	if ok {
+		g.layoutMap[obj.Name] = name
 	}
 	return ""
 }
@@ -79,7 +74,7 @@ func LayoutFunc(name string, layout interface{}) string {
 func (g *GinTemp) Load() multitemplate.Renderer {
 	r := multitemplate.NewRenderer()
 	funcMap := template.FuncMap{
-		"layout": LayoutFunc,
+		"layout": g.LayoutFunc,
 	}
 
 	widgets := g.loadFile(filepath.Join(g.TempPath, g.widgetDir))
@@ -88,20 +83,24 @@ func (g *GinTemp) Load() multitemplate.Renderer {
 	fmt.Println("views", views)
 
 	for _, view := range views {
-
+ 
 		name, _ := filepath.Rel(fmt.Sprintf("%s/%s", g.TempPath, g.viewDir), view)
 		layoutObject := LayoutObject{
 			Name: name,
 		}
-		t := template.Must(template.New(name).Funcs(funcMap).ParseFiles(view))
+  
+		t := template.Must(template.New(filepath.Base(view)).Funcs(funcMap).ParseFiles(view) )
 		var buf bytes.Buffer
-		t.Execute(&buf, layoutObject)
+		err := t.Execute(&buf, layoutObject)
 
-		fmt.Println("layoutmap",layout_map)
+		if err != nil {
+			fmt.Println("template Must execute :",view,err)
+		}
 
+ 
 		layoutPath := fmt.Sprintf("%s/%s/layout.html", g.TempPath, g.layoutDir)
-		if v, ok := layout_map[name]; ok {
-			layoutPath = fmt.Sprintf("%s/%s/%s.%s", g.TempPath, g.layoutDir, v, g.ext)
+		if v, ok := g.layoutMap[name]; ok {
+			layoutPath = fmt.Sprintf("%s/%s/%s%s", g.TempPath, g.layoutDir, v, g.ext)
 		}
 
 		var s []string
@@ -110,7 +109,6 @@ func (g *GinTemp) Load() multitemplate.Renderer {
 		s = append(s, view)
 		r.AddFromFilesFuncs(name, funcMap, s...)
 		log.Printf("template Load:%s,%v\n", name,s )
-
 	}
 	return r
 }
