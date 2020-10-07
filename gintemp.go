@@ -23,6 +23,10 @@ import (
 
 */
 
+var (
+	layout_map    map[string]string
+)
+
 type LayoutObject struct {
 	Name string
 }
@@ -60,11 +64,12 @@ func NewGinTemp(options ...Option) *GinTemp {
 	return gintemp
 }
 
-func (g *GinTemp) layoutFunc(name string, layout interface{}) string {
+func LayoutFunc(name string, layout interface{}) string {
 
 	obj, ok := layout.(LayoutObject)
+	fmt.Println("obj",obj,ok)
 	if ok {
-		g.layoutMap[obj.Name] = name
+		layout_map[obj.Name] = name
 	}
 	return ""
 }
@@ -74,7 +79,7 @@ func (g *GinTemp) layoutFunc(name string, layout interface{}) string {
 func (g *GinTemp) Load() multitemplate.Renderer {
 	r := multitemplate.NewRenderer()
 	funcMap := template.FuncMap{
-		"layout": g.layoutFunc,
+		"layout": LayoutFunc,
 	}
 
 	widgets := g.loadFile(filepath.Join(g.TempPath, g.widgetDir))
@@ -92,8 +97,10 @@ func (g *GinTemp) Load() multitemplate.Renderer {
 		var buf bytes.Buffer
 		t.Execute(&buf, layoutObject)
 
+		fmt.Println("layoutmap",layout_map)
+
 		layoutPath := fmt.Sprintf("%s/%s/layout.html", g.TempPath, g.layoutDir)
-		if v, ok := g.layoutMap[name]; ok {
+		if v, ok := layout_map[name]; ok {
 			layoutPath = fmt.Sprintf("%s/%s/%s.%s", g.TempPath, g.layoutDir, v, g.ext)
 		}
 
@@ -102,7 +109,7 @@ func (g *GinTemp) Load() multitemplate.Renderer {
 		s = append(s, widgets...)
 		s = append(s, view)
 		r.AddFromFilesFuncs(name, funcMap, s...)
-		log.Printf("template Load:%s \n", name)
+		log.Printf("template Load:%s,%v\n", name,s )
 
 	}
 	return r
