@@ -108,7 +108,7 @@ func (g *GinTemp) Load() multitemplate.Renderer {
 		s = append(s, widgets...)
 		s = append(s, view)
 		r.AddFromFilesFuncs(name, funcMap, s...)
-		log.Printf("template Load:%s,%v\n", name,s )
+		log.Printf("template Load:%s,%s\n", name, layoutPath)
 	}
 	return r
 }
