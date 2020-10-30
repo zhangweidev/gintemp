@@ -140,7 +140,7 @@ func (g *GinTemp) loadFile(dir string) []string {
 	return cfiles
 }
 
-func LoadTemplates() multitemplate.Renderer {
-	gintemp := NewGinTemp()
+func LoadTemplates(options ...Option) multitemplate.Renderer {
+	gintemp := NewGinTemp(options...)
 	return gintemp.Load()
 }
