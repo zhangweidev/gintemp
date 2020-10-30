@@ -22,7 +22,7 @@ import (
 实现模版的使用， 引号内的为模版名称。
 
 */
- 
+
 type LayoutObject struct {
 	Name string
 }
@@ -34,6 +34,7 @@ type GinTemp struct {
 	widgetDir string            // 组件路径
 	ext       string            // 扩展名
 	layoutMap map[string]string // 页面与模版的对应
+	funcMap   template.FuncMap  // 注入的函数
 }
 
 type Option func(*GinTemp)
@@ -41,6 +42,14 @@ type Option func(*GinTemp)
 func WithTempPath(path string) Option {
 	return func(g *GinTemp) {
 		g.TempPath = path
+	}
+}
+
+func WithFuncMap(o template.FuncMap) Option {
+	return func(g *GinTemp) {
+		for k, v := range o {
+			g.funcMap[k] = v
+		}
 	}
 }
 
@@ -52,6 +61,9 @@ func NewGinTemp(options ...Option) *GinTemp {
 	gintemp.widgetDir = "widgets"
 	gintemp.ext = ".html"
 	gintemp.layoutMap = make(map[string]string)
+	gintemp.funcMap = template.FuncMap{
+		"layout": gintemp.LayoutFunc,
+	}
 
 	for _, option := range options {
 		option(gintemp)
@@ -60,10 +72,10 @@ func NewGinTemp(options ...Option) *GinTemp {
 	return gintemp
 }
 
-func (g *GinTemp)LayoutFunc(name string, layout interface{}) string {
+func (g *GinTemp) LayoutFunc(name string, layout interface{}) string {
 
 	obj, ok := layout.(LayoutObject)
- 	if ok {
+	if ok {
 		g.layoutMap[obj.Name] = name
 	}
 	return ""
@@ -73,9 +85,6 @@ func (g *GinTemp)LayoutFunc(name string, layout interface{}) string {
 
 func (g *GinTemp) Load() multitemplate.Renderer {
 	r := multitemplate.NewRenderer()
-	funcMap := template.FuncMap{
-		"layout": g.LayoutFunc,
-	}
 
 	widgets := g.loadFile(filepath.Join(g.TempPath, g.widgetDir))
 	fmt.Println("widgets", widgets)
@@ -83,21 +92,20 @@ func (g *GinTemp) Load() multitemplate.Renderer {
 	fmt.Println("views", views)
 
 	for _, view := range views {
- 
+
 		name, _ := filepath.Rel(fmt.Sprintf("%s/%s", g.TempPath, g.viewDir), view)
 		layoutObject := LayoutObject{
 			Name: name,
 		}
-  
-		t := template.Must(template.New(filepath.Base(view)).Funcs(funcMap).ParseFiles(view) )
+
+		t := template.Must(template.New(filepath.Base(view)).Funcs(g.funcMap).ParseFiles(view))
 		var buf bytes.Buffer
 		err := t.Execute(&buf, layoutObject)
 
 		if err != nil {
-			fmt.Println("template Must execute :",view,err)
+			fmt.Println("template Must execute :", view, err)
 		}
 
- 
 		layoutPath := fmt.Sprintf("%s/%s/layout.html", g.TempPath, g.layoutDir)
 		if v, ok := g.layoutMap[name]; ok {
 			layoutPath = fmt.Sprintf("%s/%s/%s%s", g.TempPath, g.layoutDir, v, g.ext)
@@ -107,7 +115,7 @@ func (g *GinTemp) Load() multitemplate.Renderer {
 		s = append(s, layoutPath)
 		s = append(s, widgets...)
 		s = append(s, view)
-		r.AddFromFilesFuncs(name, funcMap, s...)
+		r.AddFromFilesFuncs(name, g.funcMap, s...)
 		log.Printf("template Load:%s,%s\n", name, layoutPath)
 	}
 	return r
