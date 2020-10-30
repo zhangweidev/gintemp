@@ -1,6 +1,7 @@
 package main
 
 import (
+	"html/template"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -15,7 +16,9 @@ func Hello(c *gin.Context) {
 func main() {
 	r := gin.Default()
 
-	r.HTMLRender = gintemp.LoadTemplates()
+	r.HTMLRender = gintemp.LoadTemplates(gintemp.WithFuncMap(template.FuncMap{
+		"add": func(x, y int) int { return x + y },
+	}))
 
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(200, gin.H{
@@ -27,8 +30,7 @@ func main() {
 		c.HTML(http.StatusOK, "home/index.html", gin.H{})
 	})
 
-	r.GET("/hello",Hello)
+	r.GET("/hello", Hello)
 
-
-	r.Run() // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
+	r.Run(":8012") // listen and serve on 0.0.0.0:8080 (for windows "localhost:8080")
 }
