@@ -3,6 +3,8 @@ gin layout template
 多模板加载
 为模板扩展 layout ，用于指定当前页面的模板
 
+虽然现在前端已经有了 Vue 、 React 等框架，但是使用模版有些时候可能是更好的解决方法。 
+如果用到模版来解决一些问题，可以尝试使用 `gintemp` 来跟好的管理模版。  
 
 ## 页面组成
 - layout
@@ -34,7 +36,7 @@ this right
 文件头指定了使用名为 `layout` 的模版
 
 
-## funcMap 
+### funcMap 
 模版需要使用自定义函数来格式化输出时，需要用到 funcMap 来扩展
 例如：
 ```
@@ -57,4 +59,7 @@ func funcMap() template.FuncMap {
 	) 
 
 ```
+
+
+更加详细参考 `_example` 目录
  
