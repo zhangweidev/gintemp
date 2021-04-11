@@ -1,23 +1,24 @@
 gin layout template
 ---
 多模板加载
-为模板扩展了 layout ，用于指定当前页面的模板
+为模板扩展 layout ，用于指定当前页面的模板
 
 
 ## 页面组成
-页面由 
-- 当前页面
-- 模版
+- layout
+    页面整体的结构
 - widgets
+    公共组件部分
+- page 
+    页面内容
 
-
-在页面头上加上
+在页面头上加上 layout 用于指定整体结构
 ```
 {{layout "layout" .}}
 ```
 实现模版的使用， 引号内的为模版名称。
 
-## example 
+## 例子 
 
 ```
 {{layout "layout" .}}}
@@ -33,5 +34,27 @@ this right
 文件头指定了使用名为 `layout` 的模版
 
 
-更加详细参考 `_example` 目录
+## funcMap 
+模版需要使用自定义函数来格式化输出时，需要用到 funcMap 来扩展
+例如：
+```
+// 扩展一个除法函数
+func funcMap() template.FuncMap {
+
+	return template.FuncMap{
+		"div": func(x int, y int) int {
+			return x / y
+		}, 
+	} 
+}
+
+ // ----------
+
+    r := gin.Default()
+	r.HTMLRender = gintemp.LoadTemplates(
+		gintemp.WithFuncMap(funcMap()),   // 使用扩展的函数 
+		gintemp.WithTempPath("./assets/templates"),
+	) 
+
+```
  
