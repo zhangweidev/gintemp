@@ -1,0 +1,16 @@
+{{template "widgets/header" .}}
+
+<section class="blog_area single-post-area p_120">
+    <div class="container">
+        <div class="row">
+            <div class="col-lg-8 posts-list">
+                {{template "content" .}}
+            </div>
+            <div class="col-lg-4">
+                {{template "info" .}}
+            </div>
+        </div>
+    </div>
+</section>
+
+{{template "widgets/footer" .}}
