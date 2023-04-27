@@ -1,4 +1,4 @@
-module github.com/xxiu/gintemp
+module github.com/zhangweidev/gintemp
 
 go 1.14
 
