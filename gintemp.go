@@ -98,7 +98,10 @@ func (g *GinTemp) Load() multitemplate.Renderer {
 			Name: name,
 		}
 
-		t := template.Must(template.New(filepath.Base(view)).Funcs(g.funcMap).ParseFiles(view))
+		v := []string{view}
+		v = append(v, widgets...)
+		t := template.Must(template.New(filepath.Base(view)).Funcs(g.funcMap).ParseFiles(v...))
+		
 		var buf bytes.Buffer
 		err := t.Execute(&buf, layoutObject)
 
