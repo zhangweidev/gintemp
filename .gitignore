@@ -1,0 +1,52 @@
+# ---- Docs (local notes) ----
+docs/
+
+# ---- Binaries / build output ----
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+bin/
+build/
+dist/
+dist-ssr/
+*.prof
+
+# ---- Go ----
+# Dependency directory (when vendoring is not used)
+vendor/
+
+# ---- Node / frontend ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+
+# ---- Env / secrets ----
+.env
+.env.*
+*.local
+!.env.example
+
+# ---- IDE / editor ----
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# ---- OS ----
+.DS_Store
+Thumbs.db

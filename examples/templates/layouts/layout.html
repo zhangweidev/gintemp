@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{block "title" .}}gintemp{{end}}</title>
+</head>
+<body>
+{{partial "header" .}}
+
+<section class="blog_area single-post-area p_120">
+    <div class="container">
+        <div class="row">
+            <div class="col-lg-8 posts-list">
+                {{block "content" .}}{{end}}
+            </div>
+            <div class="col-lg-4">
+                {{block "info" .}}{{end}}
+            </div>
+        </div>
+    </div>
+</section>
+
+{{partial "footer" .}}
+</body>
+</html>
