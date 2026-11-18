@@ -6,7 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/xxiu/gintemp"
+	"github.com/zhangweidev/gintemp"
 )
 
 func Hello(c *gin.Context) {

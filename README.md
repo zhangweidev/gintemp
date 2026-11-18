@@ -65,7 +65,7 @@ func funcMap() template.FuncMap {
 ```
 
 
-更加详细参考 `_example` 目录
+更加详细参考 `examples` 目录
 
 ## isuse
 - 渲染时报 `no such template "xxxxx"`：模版中引用了某个定义未实现 ,检查模版中 define 是否实现

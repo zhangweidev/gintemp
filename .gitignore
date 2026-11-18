@@ -13,7 +13,6 @@ bin/
 build/
 dist/
 dist-ssr/
-!_example/dist/
 *.prof
 
 # ---- Go ----
