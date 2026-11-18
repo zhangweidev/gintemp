@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-contrib/multitemplate"
@@ -29,6 +30,9 @@ import (
 
 // 默认 layout 名（不含扩展名）
 const defaultLayoutName = "layout"
+
+// maxLayoutDepth 限制 layout 继承层数，防止配置错误导致的死循环
+const maxLayoutDepth = 10
 
 // 匹配模板源码中的 layout 指令，如 {{layout "layout" .}}
 var layoutRe = regexp.MustCompile(`\{\{\s*-?\s*layout\s+"([^"]+)"`)
@@ -42,17 +46,18 @@ type Logger interface {
 // GinTemp 管理模板目录约定（views/layouts/widgets）、layout 探测与渲染器加载，
 // 通过 NewGinTemp 创建、Option 配置。
 type GinTemp struct {
-	tempPath      string           // 模板根路径：宿主目录，或 WithFS 时 FS 内的子目录
-	viewDir       string           // 视图文件夹
-	layoutDir     string           // 布局文件夹
-	widgetDir     string           // 组件文件夹
-	ext           string           // 模板扩展名（含点），如 ".html"
-	defaultLayout string           // 未指定 layout 时使用的默认 layout 名
-	skipPrefix    string           // 跳过该前缀命名的文件/目录（如 "_"）
-	reload        bool             // 开发期热重载
-	logger        Logger           // 日志输出，nil 表示静默
-	funcMap       template.FuncMap // 注入的模板函数
-	fsys          fs.FS            // 非 nil 时从该 FS 加载模板（如 go:embed）
+	tempPath       string           // 模板根路径：宿主目录，或 WithFS 时 FS 内的子目录
+	viewDir        string           // 视图文件夹
+	layoutDir      string           // 布局文件夹
+	widgetDir      string           // 组件文件夹
+	ext            string           // 模板扩展名（含点），如 ".html"
+	defaultLayout  string           // 未指定 layout 时使用的默认 layout 名
+	skipPrefix     string           // 跳过该前缀命名的文件/目录（如 "_"）
+	reload         bool             // 开发期热重载
+	reloadInterval time.Duration    // 热重载变更检查的最小间隔，0 表示每次渲染检查
+	logger         Logger           // 日志输出，nil 表示静默
+	funcMap        template.FuncMap // 注入的模板函数
+	fsys           fs.FS            // 非 nil 时从该 FS 加载模板（如 go:embed）
 }
 
 // Option 用于配置 GinTemp。
@@ -132,6 +137,15 @@ func WithFuncMap(o template.FuncMap) Option {
 func WithReload(enabled bool) Option {
 	return func(g *GinTemp) {
 		g.reload = enabled
+	}
+}
+
+// WithReloadInterval 设置热重载变更检查的最小间隔，默认 0（每次渲染都检查）。
+// 模板目录较大或开发期 QPS 较高时可设置如 200*time.Millisecond 降低检查开销，
+// 代价是模板变更最多延迟一个间隔才生效。仅在 WithReload 开启时有意义。
+func WithReloadInterval(d time.Duration) Option {
+	return func(g *GinTemp) {
+		g.reloadInterval = d
 	}
 }
 
@@ -237,8 +251,28 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 		return nil, err
 	}
 
+	// widgets 共享同一解析树：同名文件会互相覆盖，加载期直接报错
+	if err := checkBasenameCollisions(widgets); err != nil {
+		return nil, err
+	}
+
 	// widgets 只解析一次，各 view 通过 Clone 共享解析树
-	base := template.New("widgets").Funcs(g.funcMap)
+	funcs := make(template.FuncMap, len(g.funcMap)+1)
+	for k, v := range g.funcMap {
+		funcs[k] = v
+	}
+	var base *template.Template
+	if _, ok := funcs["partial"]; !ok {
+		// {{partial "name" .}} 按名渲染 widget；base 在闭包调用时已解析完成
+		funcs["partial"] = func(name string, data ...interface{}) (template.HTML, error) {
+			var d interface{}
+			if len(data) > 0 {
+				d = data[0]
+			}
+			return g.execPartial(base, name, d)
+		}
+	}
+	base = template.New("widgets").Funcs(funcs)
 	if len(widgets) > 0 {
 		if _, err := parseTemplateFiles(base, root, widgets); err != nil {
 			return nil, fmt.Errorf("parse widgets: %w", err)
@@ -257,30 +291,109 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 		if v, ok := extractLayout(src); ok {
 			layoutName = v
 		}
-		if err := checkLayoutName(layoutName); err != nil {
+		chain, err := g.layoutChain(root, layoutName)
+		if err != nil {
 			return nil, fmt.Errorf("view %s: %w", name, err)
 		}
-		layoutPath := path.Join(filepath.ToSlash(g.layoutDir), layoutName+g.ext)
 
 		// 同名文件会互相覆盖解析树（后解析的顶掉 layout 根模板），加载期直接报错
-		if path.Base(layoutPath) == path.Base(view) {
-			return nil, fmt.Errorf("view %s: layout %s has the same file name %q, rename one of them to avoid template name collision", name, layoutPath, path.Base(view))
+		files := append(append([]string{}, chain...), view)
+		if err := checkBasenameCollisions(files); err != nil {
+			return nil, fmt.Errorf("view %s: %w", name, err)
 		}
 
-		// 在共享 widgets 解析树的副本上解析 layout 与 view，
-		// 根模板为 layout，渲染时输出 layout 内容
+		// 在共享 widgets 解析树的副本上按 继承链从外到内 + view 的顺序解析，
+		// 后解析的 define 覆盖先解析的（layout 继承/块覆盖），
+		// 根模板为最外层 layout，渲染时输出其内容
 		tmpl, err := base.Clone()
 		if err != nil {
 			return nil, fmt.Errorf("clone widgets for %s: %w", view, err)
 		}
-		rootTmpl := tmpl.New(path.Base(layoutPath))
-		if _, err := parseTemplateFiles(rootTmpl, root, []string{layoutPath, view}); err != nil {
-			return nil, fmt.Errorf("parse %s with layout %s: %w", view, layoutPath, err)
+		rootTmpl := tmpl.New(path.Base(chain[0]))
+		if _, err := parseTemplateFiles(rootTmpl, root, files); err != nil {
+			return nil, fmt.Errorf("parse %s with layout %s: %w", view, strings.Join(chain, " -> "), err)
 		}
 		r.Add(name, rootTmpl)
-		g.logf("template Load:%s,%s\n", name, layoutPath)
+		g.logf("template Load:%s,%s\n", name, strings.Join(chain, " -> "))
 	}
 	return r, nil
+}
+
+// layoutChain 解析 layout 继承链：layout 文件顶部的 layout 指令指定其父 layout，
+// 返回从最外层到最内层的 layout 文件列表（如 [base, admin]），即解析顺序。
+// 布局继承采用块覆盖语义：内层 layout 通过 {{define}}/{{block}} 覆盖外层的同名块，
+// 最外层 layout 的顶层内容为渲染根。
+func (g *GinTemp) layoutChain(fsys fs.FS, name string) ([]string, error) {
+	var chain []string
+	seen := map[string]bool{}
+	for {
+		if seen[name] {
+			return nil, fmt.Errorf("layout %q: inheritance cycle", name)
+		}
+		seen[name] = true
+		if err := checkLayoutName(name); err != nil {
+			return nil, err
+		}
+		if len(chain) >= maxLayoutDepth {
+			return nil, fmt.Errorf("layout %q: inheritance deeper than %d levels", name, maxLayoutDepth)
+		}
+		p := path.Join(filepath.ToSlash(g.layoutDir), name+g.ext)
+		chain = append([]string{p}, chain...)
+		src, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return nil, fmt.Errorf("read layout %s: %w", p, err)
+		}
+		parent, ok := extractLayout(src)
+		if !ok {
+			return chain, nil
+		}
+		name = parent
+	}
+}
+
+// execPartial 从 widget 模板集合中按名查找模板并渲染，供 {{partial "name" .}} 使用。
+// 查找顺序：name、widgetDir/name、name+ext、widgetDir/name+ext，
+// 使得 {{partial "header" .}} 既能命中 {{define "widgets/header"}}，
+// 也能命中顶级内容的 widgets/header.html。
+func (g *GinTemp) execPartial(t *template.Template, name string, data interface{}) (template.HTML, error) {
+	widgetDir := filepath.ToSlash(g.widgetDir)
+	candidates := []string{
+		name,
+		path.Join(widgetDir, name),
+		name + g.ext,
+		path.Join(widgetDir, name+g.ext),
+	}
+	seen := map[string]bool{}
+	for _, cand := range candidates {
+		if cand == "" || seen[cand] {
+			continue
+		}
+		seen[cand] = true
+		tmpl := t.Lookup(cand)
+		if tmpl == nil {
+			continue
+		}
+		var buf strings.Builder
+		if err := tmpl.Execute(&buf, data); err != nil {
+			return "", fmt.Errorf("partial %q: %w", name, err)
+		}
+		return template.HTML(buf.String()), nil // #nosec G203 输出来自受信任的模板文件，其中的数据仍按模板规则转义
+	}
+	return "", fmt.Errorf("gintemp: partial %q not found", name)
+}
+
+// checkBasenameCollisions 校验一组模板文件的 base name 两两不同：
+// 同名文件解析进同一模板集合时会互相覆盖（后解析的顶掉先解析的）。
+func checkBasenameCollisions(files []string) error {
+	seen := map[string]string{}
+	for _, f := range files {
+		b := path.Base(f)
+		if prev, ok := seen[b]; ok {
+			return fmt.Errorf("templates %s and %s have the same file name %q, rename one of them to avoid template name collision", prev, f, b)
+		}
+		seen[b] = f
+	}
+	return nil
 }
 
 // parseTemplateFiles 将 files 依次解析进 t 的模板集合，语义与
@@ -377,9 +490,10 @@ func (g *GinTemp) logf(format string, args ...interface{}) {
 // 重新加载失败时继续使用旧模板，避免坏模板打断开发服务。
 type reloadRenderer struct {
 	multitemplate.Renderer
-	g       *GinTemp
-	mu      sync.RWMutex
-	modTime time.Time // 上次加载时模板目录的最新 mtime
+	g         *GinTemp
+	mu        sync.RWMutex
+	modTime   time.Time    // 上次加载时模板目录的最新 mtime
+	lastCheck atomic.Int64 // 上次变更检查时间（unix 纳秒），配合 reloadInterval 节流
 }
 
 // Instance 返回渲染器；模板文件变化后先自动重新加载
@@ -391,6 +505,14 @@ func (rr *reloadRenderer) Instance(name string, data interface{}) render.Render 
 }
 
 func (rr *reloadRenderer) reloadIfChanged() {
+	if d := rr.g.reloadInterval; d > 0 {
+		now := time.Now().UnixNano()
+		last := rr.lastCheck.Load()
+		// 未到检查时间，或已有并发检查在进行时直接跳过
+		if now-last < int64(d) || !rr.lastCheck.CompareAndSwap(last, now) {
+			return
+		}
+	}
 	modTime, err := rr.g.latestModTime()
 	if err != nil {
 		rr.g.logf("gintemp: check template changes: %v", err)

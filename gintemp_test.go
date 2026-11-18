@@ -24,8 +24,14 @@ const testdataPath = "testdata/templates"
 // renderWith 渲染指定 view 并返回输出内容
 func renderWith(t *testing.T, r multitemplate.Renderer, name string) string {
 	t.Helper()
+	return renderWithData(t, r, name, map[string]interface{}{})
+}
+
+// renderWithData 以指定数据渲染 view 并返回输出内容
+func renderWithData(t *testing.T, r multitemplate.Renderer, name string, data interface{}) string {
+	t.Helper()
 	w := httptest.NewRecorder()
-	if err := r.Instance(name, map[string]interface{}{}).Render(w); err != nil {
+	if err := r.Instance(name, data).Render(w); err != nil {
 		t.Fatalf("render %s: %v", name, err)
 	}
 	return w.Body.String()
@@ -513,6 +519,131 @@ func TestWithLogger(t *testing.T) {
 	_ = renderWith(t, r, "v.html")
 	if !strings.Contains(lg.joined(), "template Load:v.html") {
 		t.Fatalf("logger did not receive load log:\n%s", lg.joined())
+	}
+}
+
+func TestPartialFunc(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `[{{partial "header" .}}|{{template "content" .}}|{{partial "footer" .}}|{{partial "hero" .}}]`)
+	writeTemplate(t, dir, "widgets/header.html", `{{define "widgets/header"}}H:{{.Title}}{{end}}`)
+	writeTemplate(t, dir, "widgets/footer.html", `{{define "widgets/footer"}}F{{end}}`)
+	writeTemplate(t, dir, "widgets/hero.html", `HERO-{{.Title}}`) // 顶级内容 widget
+	writeTemplate(t, dir, "views/v.html", `{{layout "layout" .}}{{define "content"}}{{partial "widgets/header" .}}|{{partial "footer" .}}{{end}}`)
+
+	r, err := LoadTemplates(WithTempPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := renderWithData(t, r, "v.html", map[string]interface{}{"Title": "T"})
+	// layout 中 partial 按名渲染 define 型与顶级内容型 widget，
+	// view 中 partial("widgets/header") 走完整 define 名
+	want := `[H:T|H:T|F|F|HERO-T]`
+	if !strings.Contains(out, want) {
+		t.Fatalf("partial render wrong, want %q:\n%s", want, out)
+	}
+}
+
+func TestPartialNotFound(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{layout "layout" .}}{{define "content"}}{{partial "missing" .}}{{end}}`)
+
+	r, err := LoadTemplates(WithTempPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	err = r.Instance("v.html", map[string]interface{}{}).Render(w)
+	if err == nil || !strings.Contains(err.Error(), `partial "missing" not found`) {
+		t.Fatalf("want partial not found error, got %v", err)
+	}
+}
+
+func TestNestedLayout(t *testing.T) {
+	dir := t.TempDir()
+	// 最外层 layout 的顶层内容为渲染根，{{block}} 提供默认值
+	writeTemplate(t, dir, "layouts/base.html", `<html><aside>{{block "sidebar" .}}S-DEF{{end}}</aside><main>{{block "content" .}}C-DEF{{end}}</main></html>`)
+	// 内层 layout 用 layout 指令指定父 layout，define 覆盖外层同名块；
+	// 顶层内容（除指令外）不参与渲染
+	writeTemplate(t, dir, "layouts/admin.html", `{{layout "base" .}}{{define "sidebar"}}S-ADMIN{{end}}`)
+	writeTemplate(t, dir, "views/v.html", `{{layout "admin" .}}{{define "content"}}VIEW{{end}}`)
+	// 直接使用 base 的页面回退到默认块
+	writeTemplate(t, dir, "views/w.html", `{{layout "base" .}}{{define "content"}}W-CONTENT{{end}}`)
+
+	r, err := LoadTemplates(WithTempPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := renderWith(t, r, "v.html")
+	if want := `<html><aside>S-ADMIN</aside><main>VIEW</main></html>`; out != want {
+		t.Fatalf("nested layout render = %q, want %q", out, want)
+	}
+	out = renderWith(t, r, "w.html")
+	if want := `<html><aside>S-DEF</aside><main>W-CONTENT</main></html>`; out != want {
+		t.Fatalf("base layout render = %q, want %q", out, want)
+	}
+}
+
+func TestNestedLayoutCycleAndMissing(t *testing.T) {
+	// 循环继承
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/a.html", `{{layout "b" .}}`)
+	writeTemplate(t, dir, "layouts/b.html", `{{layout "a" .}}`)
+	writeTemplate(t, dir, "views/v.html", `{{layout "a" .}}{{define "content"}}x{{end}}`)
+	if _, err := LoadTemplates(WithTempPath(dir)); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("want inheritance cycle error, got %v", err)
+	}
+
+	// 父 layout 缺失
+	dir2 := t.TempDir()
+	writeTemplate(t, dir2, "layouts/admin.html", `{{layout "base" .}}`)
+	writeTemplate(t, dir2, "views/v.html", `{{layout "admin" .}}{{define "content"}}x{{end}}`)
+	if _, err := LoadTemplates(WithTempPath(dir2)); err == nil {
+		t.Fatal("want error for missing parent layout, got nil")
+	}
+
+	// 超过继承层数上限
+	dir3 := t.TempDir()
+	for i := 0; i <= maxLayoutDepth; i++ {
+		writeTemplate(t, dir3, fmt.Sprintf("layouts/l%d.html", i), fmt.Sprintf(`{{layout "l%d" .}}`, i+1))
+	}
+	writeTemplate(t, dir3, "views/v.html", `{{layout "l0" .}}{{define "content"}}x{{end}}`)
+	if _, err := LoadTemplates(WithTempPath(dir3)); err == nil || !strings.Contains(err.Error(), "deeper than") {
+		t.Fatalf("want depth limit error, got %v", err)
+	}
+}
+
+func TestWidgetsBasenameCollision(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}x{{end}}`)
+	writeTemplate(t, dir, "widgets/a/header.html", `{{define "widgets/header"}}A{{end}}`)
+	writeTemplate(t, dir, "widgets/b/header.html", `{{define "widgets/header2"}}B{{end}}`)
+
+	_, err := LoadTemplates(WithTempPath(dir))
+	if err == nil || !strings.Contains(err.Error(), "same file name") {
+		t.Fatalf("want widget name collision error, got %v", err)
+	}
+}
+
+func TestReloadIntervalThrottle(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `A[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}ONE{{end}}`)
+
+	r, err := LoadTemplates(WithTempPath(dir), WithReload(true), WithReloadInterval(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "A[ONE]") {
+		t.Fatalf("initial render wrong:\n%s", out)
+	}
+
+	// 间隔内的变更不触发重新加载
+	writeTemplate(t, dir, "layouts/layout.html", `B[{{template "content" .}}]`)
+	bumpModTime(t, dir)
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "A[ONE]") {
+		t.Fatalf("throttled reload should keep old templates:\n%s", out)
 	}
 }
 
