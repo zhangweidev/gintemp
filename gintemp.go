@@ -83,7 +83,7 @@ func NewGinTemp(options ...Option) *GinTemp {
 //
 
 func (g *GinTemp) Load() (multitemplate.Renderer, error) {
-	r := multitemplate.NewRenderer()
+	r := multitemplate.New()
 
 	widgets, err := g.loadFile(filepath.Join(g.TempPath, g.widgetDir))
 	if err != nil {
