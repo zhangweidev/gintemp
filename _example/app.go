@@ -2,6 +2,7 @@ package main
 
 import (
 	"html/template"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -16,9 +17,13 @@ func Hello(c *gin.Context) {
 func main() {
 	r := gin.Default()
 
-	r.HTMLRender = gintemp.LoadTemplates(gintemp.WithFuncMap(template.FuncMap{
+	renderer, err := gintemp.LoadTemplates(gintemp.WithFuncMap(template.FuncMap{
 		"add": func(x, y int) int { return x + y },
 	}))
+	if err != nil {
+		log.Fatal(err)
+	}
+	r.HTMLRender = renderer
 
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(200, gin.H{

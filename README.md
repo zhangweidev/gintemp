@@ -53,10 +53,14 @@ func funcMap() template.FuncMap {
  // ----------
 
     r := gin.Default()
-	r.HTMLRender = gintemp.LoadTemplates(
+	renderer, err := gintemp.LoadTemplates(
 		gintemp.WithFuncMap(funcMap()),   // 使用扩展的函数 
 		gintemp.WithTempPath("./assets/templates"),
-	) 
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	r.HTMLRender = renderer
 
 ```
 
@@ -64,7 +68,7 @@ func funcMap() template.FuncMap {
 更加详细参考 `_example` 目录
 
 ## isuse
-- template Must execute : xxxxx: no such template "title"
+- 渲染时报 `no such template "xxxxx"`：模版中引用了某个定义未实现 ,检查模版中 define 是否实现
 
-模版中出现了某个定义未实现 ,检查模版
+layout 指令（如 `{{layout "layout" .}}`）在模板加载时静态提取，不再预执行模板，加载期不会出现 `no such template` 类报错。
  
