@@ -218,6 +218,8 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve view name %s: %w", view, err)
 		}
+		// 模板名统一使用斜杠，保证 Windows 下与调用方 c.HTML("auth/login.html", ...) 一致
+		name = filepath.ToSlash(name)
 
 		// 静态提取 layout 指令（替代旧的"预执行模板 + 副作用写 map"探测）
 		src, err := os.ReadFile(view)
@@ -232,6 +234,10 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 			return nil, fmt.Errorf("view %s: %w", name, err)
 		}
 		layoutPath := filepath.Join(g.tempPath, g.layoutDir, layoutName+g.ext)
+		// 同名文件会互相覆盖解析树（后解析的顶掉 layout 根模板），加载期直接报错
+		if filepath.Base(layoutPath) == filepath.Base(view) {
+			return nil, fmt.Errorf("view %s: layout %s has the same file name %q, rename one of them to avoid template name collision", name, layoutPath, filepath.Base(view))
+		}
 
 		// 在共享 widgets 解析树的副本上解析 layout 与 view，
 		// 根模板为 layout，渲染时输出 layout 内容
@@ -267,36 +273,35 @@ func checkLayoutName(name string) error {
 }
 
 // loadFile 递归加载目录下扩展名匹配的模板文件，
-// 跳过以 skipPrefix 命名的文件与目录
+// 跳过以 skipPrefix 命名的文件与目录；目录不存在时返回空列表。
+// 使用 os.ReadDir 而非 Glob，目录名含 [ ] 等特殊字符时也能正确遍历。
 func (g *GinTemp) loadFile(dir string) ([]string, error) {
-
-	files, err := filepath.Glob(filepath.Join(dir, "*"))
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("glob %s: %w", dir, err)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read dir %s: %w", dir, err)
 	}
-	cfiles := []string{}
-	for _, f := range files {
-		if g.skipPrefix != "" && strings.HasPrefix(filepath.Base(f), g.skipPrefix) {
+	var files []string
+	for _, e := range entries {
+		if g.skipPrefix != "" && strings.HasPrefix(e.Name(), g.skipPrefix) {
 			continue
 		}
-		finfo, err := os.Stat(f)
-		if err != nil {
-			return nil, fmt.Errorf("stat %s: %w", f, err)
-		}
-		if finfo.IsDir() {
+		f := filepath.Join(dir, e.Name())
+		if e.IsDir() {
 			childFiles, err := g.loadFile(f)
 			if err != nil {
 				return nil, err
 			}
-			cfiles = append(cfiles, childFiles...)
-		} else {
-			if filepath.Ext(f) == g.ext {
-				cfiles = append(cfiles, f)
-			}
+			files = append(files, childFiles...)
+			continue
 		}
-
+		if filepath.Ext(e.Name()) == g.ext {
+			files = append(files, f)
+		}
 	}
-	return cfiles, nil
+	return files, nil
 }
 
 // logf 输出日志；未注入 Logger 时静默

@@ -114,10 +114,42 @@ func TestLoadFileMissingDir(t *testing.T) {
 	}
 }
 
-func TestLoadFileBadGlobPattern(t *testing.T) {
-	g := NewGinTemp()
-	if _, err := g.loadFile("testdata/["); err == nil {
-		t.Fatal("want glob pattern error, got nil")
+func TestLoadFileSpecialCharDir(t *testing.T) {
+	// 回归测试：目录名含 [ ] 等 glob 特殊字符时（旧实现 filepath.Glob 会失效），
+	// 模板仍能被正确发现
+	dir := t.TempDir()
+	writeTemplate(t, dir, "views/[draft]/v.html", `{{define "content"}}X{{end}}`)
+
+	g := NewGinTemp(WithTempPath(dir))
+	root := filepath.Join(dir, "views", "[draft]")
+	got, err := g.loadFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(root, "v.html")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("loadFile(views/[draft]) = %v, want %v", got, want)
+	}
+}
+
+func TestViewLayoutNameCollision(t *testing.T) {
+	// view 与 layout 同名文件时，后解析的 view 会覆盖 layout 根模板，
+	// 页面将静默丢掉 layout —— 加载期必须报错
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/home.html", `[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/home.html", `{{layout "home" .}}{{define "content"}}X{{end}}`)
+
+	_, err := LoadTemplates(WithTempPath(dir))
+	if err == nil || !strings.Contains(err.Error(), "same file name") {
+		t.Fatalf("want name collision error, got %v", err)
+	}
+
+	// view 与默认 layout 同名同样拒绝
+	dir2 := t.TempDir()
+	writeTemplate(t, dir2, "layouts/layout.html", `[{{template "content" .}}]`)
+	writeTemplate(t, dir2, "views/layout.html", `{{define "content"}}X{{end}}`)
+	if _, err := LoadTemplates(WithTempPath(dir2)); err == nil || !strings.Contains(err.Error(), "same file name") {
+		t.Fatalf("want name collision error for default layout, got %v", err)
 	}
 }
 
