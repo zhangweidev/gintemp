@@ -2,6 +2,7 @@ package gintemp
 
 import (
 	"html/template"
+	"io/fs"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-contrib/multitemplate"
 )
@@ -226,6 +228,148 @@ func TestConcurrentRender(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestNoReloadByDefault(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `A[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}ONE{{end}}`)
+
+	r, err := LoadTemplates(WithTempPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "A[ONE]") {
+		t.Fatalf("initial render wrong:\n%s", out)
+	}
+
+	writeTemplate(t, dir, "layouts/layout.html", `B[{{template "content" .}}]`)
+	bumpModTime(t, dir)
+
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "A[ONE]") {
+		t.Fatalf("templates should not reload without WithReload:\n%s", out)
+	}
+}
+
+func TestReloadPicksUpChanges(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `A[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}ONE{{end}}`)
+
+	r, err := LoadTemplates(WithTempPath(dir), WithReload(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "A[ONE]") {
+		t.Fatalf("initial render wrong:\n%s", out)
+	}
+
+	writeTemplate(t, dir, "layouts/layout.html", `B[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}TWO{{end}}`)
+	bumpModTime(t, dir)
+
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "B[TWO]") {
+		t.Fatalf("reload did not pick up changes:\n%s", out)
+	}
+}
+
+func TestReloadKeepsOldOnBrokenTemplate(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `A[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}ONE{{end}}`)
+
+	r, err := LoadTemplates(WithTempPath(dir), WithReload(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "A[ONE]") {
+		t.Fatalf("initial render wrong:\n%s", out)
+	}
+
+	// 写坏模板：重新加载失败时应继续使用旧模板
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}{{end`)
+	bumpModTime(t, dir)
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "A[ONE]") {
+		t.Fatalf("broken template should keep old output:\n%s", out)
+	}
+
+	// 修好后自动恢复
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}FIXED{{end}}`)
+	bumpModTime(t, dir)
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "A[FIXED]") {
+		t.Fatalf("reload did not recover after fix:\n%s", out)
+	}
+}
+
+func TestConcurrentRenderWithReload(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `A[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}ONE{{end}}`)
+
+	r, err := LoadTemplates(WithTempPath(dir), WithReload(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// goroutine 内不能用 t.Fatal，改用 t.Error 上报
+	write := func(content string) {
+		p := filepath.Join(dir, "views", "v.html")
+		if err := os.WriteFile(p, []byte(`{{define "content"}}`+content+`{{end}}`), 0o644); err != nil {
+			t.Error(err)
+			return
+		}
+		future := time.Now().Add(2 * time.Second)
+		if err := os.Chtimes(p, future, future); err != nil {
+			t.Error(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				w := httptest.NewRecorder()
+				if err := r.Instance("v.html", map[string]interface{}{}).Render(w); err != nil {
+					t.Error(err)
+					return
+				}
+				out := w.Body.String()
+				if !strings.Contains(out, "A[ONE]") && !strings.Contains(out, "A[TWO]") {
+					t.Errorf("unexpected output:\n%s", out)
+					return
+				}
+			}
+		}(i)
+		for k := 0; k < 2; k++ {
+			wg.Add(1)
+			go func(i, k int) {
+				defer wg.Done()
+				content := "ONE"
+				if (i+k)%2 == 0 {
+					content = "TWO"
+				}
+				write(content)
+			}(i, k)
+		}
+	}
+	wg.Wait()
+}
+
+// bumpModTime 将目录下所有文件的 mtime 显式推后，保证 mtime 检测能感知变化
+func bumpModTime(t *testing.T, root string) {
+	t.Helper()
+	future := time.Now().Add(2 * time.Second)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, future, future)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeTemplate(t *testing.T, root, rel, content string) {

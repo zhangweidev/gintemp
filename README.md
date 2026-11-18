@@ -67,6 +67,20 @@ func funcMap() template.FuncMap {
 
 更加详细参考 `examples` 目录
 
+## 开发期热重载
+模板修改后自动重新加载，无需重启进程：
+```
+renderer, err := gintemp.LoadTemplates(
+    gintemp.WithTempPath("./assets/templates"),
+    gintemp.WithReload(true),   // 开发期开启热重载
+)
+if err != nil {
+    log.Fatal(err)
+}
+r.HTMLRender = renderer
+```
+渲染时检测 `views` / `layouts` / `widgets` 目录的文件变化（mtime），变化后自动重新加载；重新加载失败（如模板写错）时继续使用旧模板并输出日志，修好后自动恢复。生产环境建议关闭。
+
 ## isuse
 - 渲染时报 `no such template "xxxxx"`：模版中引用了某个定义未实现 ,检查模版中 define 是否实现
 
