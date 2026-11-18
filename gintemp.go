@@ -18,10 +18,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"text/template/parse"
 	"time"
 
 	"github.com/gin-contrib/multitemplate"
@@ -33,9 +33,6 @@ const defaultLayoutName = "layout"
 
 // maxLayoutDepth 限制 layout 继承层数，防止配置错误导致的死循环
 const maxLayoutDepth = 10
-
-// 匹配模板源码中的 layout 指令，如 {{layout "layout" .}}
-var layoutRe = regexp.MustCompile(`\{\{\s*-?\s*layout\s+"([^"]+)"`)
 
 // Logger 是库的日志输出接口，兼容标准库 *log.Logger。
 // 默认不输出任何日志，可通过 WithLogger 注入。
@@ -428,13 +425,39 @@ func relName(dir, p string) string {
 	return strings.TrimPrefix(p, dir+"/")
 }
 
-// extractLayout 从模板源码中静态提取 layout 指令指定的模版名称
+// extractLayout 从模板源码顶层静态提取 layout 指令指定的模版名称。
+// 基于模板 AST（text/template/parse）识别，只认顶层的
+// {{layout "name" ...}} 调用且名字必须是字符串字面量：
+// 注释、{{define}} 块与条件分支内部的同名文本不会被误识别。
+// 源码语法错误时返回 false，由后续解析阶段报出具体错误。
 func extractLayout(src []byte) (string, bool) {
-	m := layoutRe.FindSubmatch(src)
-	if m == nil {
+	tree := parse.New("gintemp-scan", map[string]any{})
+	tree.Mode |= parse.SkipFuncCheck
+	if _, err := tree.Parse(string(src), "{{", "}}", map[string]*parse.Tree{}); err != nil {
 		return "", false
 	}
-	return string(m[1]), true
+	for _, n := range tree.Root.Nodes {
+		action, ok := n.(*parse.ActionNode)
+		if !ok {
+			continue
+		}
+		for _, cmd := range action.Pipe.Cmds {
+			args := cmd.Args
+			if len(args) < 2 {
+				continue
+			}
+			id, ok := args[0].(*parse.IdentifierNode)
+			if !ok || id.Ident != "layout" {
+				continue
+			}
+			s, ok := args[1].(*parse.StringNode)
+			if !ok {
+				continue
+			}
+			return s.Text, true
+		}
+	}
+	return "", false
 }
 
 // checkLayoutName 校验 layout 名称，防止路径穿越读取模板目录之外的文件

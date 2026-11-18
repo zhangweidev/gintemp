@@ -52,6 +52,10 @@ func TestExtractLayout(t *testing.T) {
 		{"first match wins", `{{layout "a" .}}{{layout "b" .}}`, "a", true},
 		{"non literal arg", `{{layout (printf "x") .}}`, "", false},
 		{"only keyword", `{{layout}}`, "", false},
+		{"inside define ignored", `{{define "x"}}{{layout "inner" .}}{{end}}`, "", false},
+		{"inside comment ignored", `{{/* {{layout "x" .}} */}}`, "", false},
+		{"inside branch ignored", `{{if .X}}{{layout "x" .}}{{end}}`, "", false},
+		{"syntax error", `{{define "x"}}{{end`, "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -666,6 +670,31 @@ func rootFSOf(t *testing.T, g *GinTemp) fs.FS {
 		t.Fatal(err)
 	}
 	return fsys
+}
+
+func BenchmarkLoad(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := LoadTemplates(WithTempPath(testdataPath)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRender(b *testing.B) {
+	r, err := LoadTemplates(WithTempPath(testdataPath))
+	if err != nil {
+		b.Fatal(err)
+	}
+	data := map[string]interface{}{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		w := httptest.NewRecorder()
+		if err := r.Instance("home/index.html", data).Render(w); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func TestWithFS(t *testing.T) {
