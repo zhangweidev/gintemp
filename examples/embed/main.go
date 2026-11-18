@@ -1,5 +1,6 @@
 // 示例：用 go:embed 将模板编译进二进制，实现单文件部署。
 // 目录结构约定（views/layouts/widgets）与文件系统模式一致。
+// 在仓库根目录运行：go run ./examples/embed
 package main
 
 import (

@@ -59,7 +59,7 @@ templates/
 ```go
 r := gin.Default()
 renderer, err := gintemp.LoadTemplates(
-    gintemp.WithTempPath("./assets/templates"),
+    gintemp.WithTempPath("./templates"),
 )
 if err != nil {
     log.Fatal(err)
@@ -156,7 +156,7 @@ func funcMap() template.FuncMap {
 r := gin.Default()
 renderer, err := gintemp.LoadTemplates(
     gintemp.WithFuncMap(funcMap()), // 使用扩展的函数
-    gintemp.WithTempPath("./assets/templates"),
+    gintemp.WithTempPath("./templates"),
 )
 if err != nil {
     log.Fatal(err)
@@ -184,7 +184,7 @@ renderer, err := gintemp.LoadTemplates(gintemp.WithFS(templatesFS))
 
 ```go
 renderer, err := gintemp.LoadTemplates(
-    gintemp.WithTempPath("./assets/templates"),
+    gintemp.WithTempPath("./templates"),
     gintemp.WithReload(true), // 开发期开启热重载
     // gintemp.WithReloadInterval(200 * time.Millisecond), // 可选：变更检查节流
 )

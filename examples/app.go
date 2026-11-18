@@ -1,3 +1,5 @@
+// 示例：从文件系统加载模板（views/layouts/widgets 三段式目录约定）。
+// 在仓库根目录运行：go run ./examples
 package main
 
 import (
@@ -17,9 +19,13 @@ func Hello(c *gin.Context) {
 func main() {
 	r := gin.Default()
 
-	renderer, err := gintemp.LoadTemplates(gintemp.WithFuncMap(template.FuncMap{
-		"add": func(x, y int) int { return x + y },
-	}))
+	renderer, err := gintemp.LoadTemplates(
+		gintemp.WithTempPath("./examples/templates"), // 模板根路径（相对运行目录）
+		gintemp.WithFuncMap(template.FuncMap{ // 注入自定义模板函数
+			"add": func(x, y int) int { return x + y },
+		}),
+		// gintemp.WithReload(true), // 开发期可开启热重载，改模板免重启
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -32,6 +38,7 @@ func main() {
 	})
 
 	r.GET("/", func(c *gin.Context) {
+		// 模板名为相对 views 目录的斜杠路径
 		c.HTML(http.StatusOK, "home/index.html", gin.H{})
 	})
 
