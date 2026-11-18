@@ -1,6 +1,7 @@
 package gintemp
 
 import (
+	"fmt"
 	"html/template"
 	"io/fs"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -311,10 +313,17 @@ func TestConcurrentRenderWithReload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// goroutine 内不能用 t.Fatal，改用 t.Error 上报
+	// goroutine 内不能用 t.Fatal，改用 t.Error 上报；
+	// 写入用 唯一临时文件 + rename 原子替换，避免 build 读到截断中的文件
+	var seq int64
 	write := func(content string) {
 		p := filepath.Join(dir, "views", "v.html")
-		if err := os.WriteFile(p, []byte(`{{define "content"}}`+content+`{{end}}`), 0o644); err != nil {
+		tmp := fmt.Sprintf("%s.%d.tmp", p, atomic.AddInt64(&seq, 1))
+		if err := os.WriteFile(tmp, []byte(`{{define "content"}}`+content+`{{end}}`), 0o644); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Rename(tmp, p); err != nil {
 			t.Error(err)
 			return
 		}
@@ -369,6 +378,108 @@ func bumpModTime(t *testing.T, root string) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOptionsCustomDirsAndExt(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "tpl/my-layout.tpl", `<my>{{template "content" .}}</my>`)
+	writeTemplate(t, dir, "pages/v.tpl", `{{layout "my-layout" .}}{{define "content"}}X{{end}}`)
+
+	r, err := LoadTemplates(
+		WithTempPath(dir),
+		WithViewDir("pages"),
+		WithLayoutDir("tpl"),
+		WithWidgetDir("parts"),
+		WithExt("tpl"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := renderWith(t, r, "v.tpl"); !strings.Contains(out, "<my>X</my>") {
+		t.Fatalf("custom dirs/ext not applied:\n%s", out)
+	}
+}
+
+func TestWithDefaultLayout(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/base.html", `BASE[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}X{{end}}`)
+
+	r, err := LoadTemplates(WithTempPath(dir), WithDefaultLayout("base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "BASE[X]") {
+		t.Fatalf("custom default layout not applied:\n%s", out)
+	}
+
+	// 非法默认 layout 名同样被拒绝
+	if _, err := LoadTemplates(WithTempPath(dir), WithDefaultLayout("../evil")); err == nil {
+		t.Fatal("want illegal layout name error, got nil")
+	}
+}
+
+func TestWithSkipPrefix(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}OK{{end}}`)
+	writeTemplate(t, dir, "views/_partial.html", `{{define "content"}}BROKEN{{end`)
+	writeTemplate(t, dir, "views/_drafts/hidden.html", `{{define "content"}}HIDDEN{{end}}`)
+
+	// 不跳过时 _partial.html 语法错误会导致加载失败
+	if _, err := LoadTemplates(WithTempPath(dir)); err == nil {
+		t.Fatal("want parse error for _partial.html, got nil")
+	}
+
+	r, err := LoadTemplates(WithTempPath(dir), WithSkipPrefix("_"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := renderWith(t, r, "v.html")
+	if !strings.Contains(out, "[OK]") || strings.Contains(out, "BROKEN") || strings.Contains(out, "HIDDEN") {
+		t.Fatalf("skip prefix not applied:\n%s", out)
+	}
+}
+
+type testLogger struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (l *testLogger) Printf(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.msgs = append(l.msgs, fmt.Sprintf(format, args...))
+}
+
+func (l *testLogger) joined() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.msgs, "\n")
+}
+
+func TestWithLogger(t *testing.T) {
+	dir := t.TempDir()
+	writeTemplate(t, dir, "layouts/layout.html", `[{{template "content" .}}]`)
+	writeTemplate(t, dir, "views/v.html", `{{define "content"}}OK{{end}}`)
+
+	// 默认静默
+	r, err := LoadTemplates(WithTempPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = renderWith(t, r, "v.html")
+
+	// 注入 logger 后收到加载日志
+	lg := &testLogger{}
+	r, err = LoadTemplates(WithTempPath(dir), WithLogger(lg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = renderWith(t, r, "v.html")
+	if !strings.Contains(lg.joined(), "template Load:v.html") {
+		t.Fatalf("logger did not receive load log:\n%s", lg.joined())
 	}
 }
 

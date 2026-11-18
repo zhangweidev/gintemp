@@ -1,10 +1,17 @@
+// Package gintemp 为 Gin 提供多模板 layout 加载器。
+//
+// 页面由 当前页面、layout、widgets 三部分组成。
+// 在页面头部用 layout 指令指定主模板，引号内为 layout 名（不含扩展名）：
+//
+//	{{layout "layout" .}}
+//
+// 该指令在模板加载时静态提取，渲染时为空操作。
 package gintemp
 
 import (
 	"fmt"
 	"html/template"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,44 +23,96 @@ import (
 	"github.com/gin-gonic/gin/render"
 )
 
-/** 多模板加载
-模板中通过 layout 指令指定当前页面的主模板，加载时静态提取该指令
-页面由 当前页面、模版、和 widgets 组成
-
-在页面头上加上
-
-{{layout "layout" .}}
-
-实现模版的使用， 引号内的为模版名称。
-
-*/
-
 // 默认 layout 名（不含扩展名）
 const defaultLayoutName = "layout"
 
 // 匹配模板源码中的 layout 指令，如 {{layout "layout" .}}
 var layoutRe = regexp.MustCompile(`\{\{\s*-?\s*layout\s+"([^"]+)"`)
 
-type GinTemp struct {
-	TempPath  string           // 模版路径
-	viewDir   string           // 视图文件夹
-	layoutDir string           // 布局路径
-	widgetDir string           // 组件路径
-	ext       string           // 扩展名
-	reload    bool             // 开发期热重载
-	funcMap   template.FuncMap // 注入的函数
+// Logger 是库的日志输出接口，兼容标准库 *log.Logger。
+// 默认不输出任何日志，可通过 WithLogger 注入。
+type Logger interface {
+	Printf(format string, args ...interface{})
 }
 
+// GinTemp 管理模板目录约定（views/layouts/widgets）、layout 探测与渲染器加载，
+// 通过 NewGinTemp 创建、Option 配置。
+type GinTemp struct {
+	tempPath      string           // 模板根路径
+	viewDir       string           // 视图文件夹
+	layoutDir     string           // 布局文件夹
+	widgetDir     string           // 组件文件夹
+	ext           string           // 模板扩展名（含点），如 ".html"
+	defaultLayout string           // 未指定 layout 时使用的默认 layout 名
+	skipPrefix    string           // 跳过该前缀命名的文件/目录（如 "_"）
+	reload        bool             // 开发期热重载
+	logger        Logger           // 日志输出，nil 表示静默
+	funcMap       template.FuncMap // 注入的模板函数
+}
+
+// Option 用于配置 GinTemp。
 type Option func(*GinTemp)
 
+// WithTempPath 设置模板根路径，默认 "./templates"。
 func WithTempPath(path string) Option {
 	return func(g *GinTemp) {
-		g.TempPath = path
+		g.tempPath = path
 	}
 }
 
+// WithViewDir 设置视图目录名（相对模板根路径），默认 "views"。
+func WithViewDir(dir string) Option {
+	return func(g *GinTemp) {
+		g.viewDir = dir
+	}
+}
+
+// WithLayoutDir 设置布局目录名（相对模板根路径），默认 "layouts"。
+func WithLayoutDir(dir string) Option {
+	return func(g *GinTemp) {
+		g.layoutDir = dir
+	}
+}
+
+// WithWidgetDir 设置组件目录名（相对模板根路径），默认 "widgets"。
+func WithWidgetDir(dir string) Option {
+	return func(g *GinTemp) {
+		g.widgetDir = dir
+	}
+}
+
+// WithExt 设置模板扩展名，默认 ".html"；省略前导点时自动补全。
+func WithExt(ext string) Option {
+	return func(g *GinTemp) {
+		if ext != "" && !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		g.ext = ext
+	}
+}
+
+// WithDefaultLayout 设置页面未用 layout 指令指定主模板时的默认 layout 名（不含扩展名），
+// 默认 "layout"。
+func WithDefaultLayout(name string) Option {
+	return func(g *GinTemp) {
+		g.defaultLayout = name
+	}
+}
+
+// WithSkipPrefix 跳过以指定前缀命名的文件与目录（含扩展名前的部分），
+// 例如 WithSkipPrefix("_") 可让 _partial.html 之类的片段不被当作页面加载。
+func WithSkipPrefix(prefix string) Option {
+	return func(g *GinTemp) {
+		g.skipPrefix = prefix
+	}
+}
+
+// WithFuncMap 注入自定义模板函数，可多次调用，后者覆盖同名函数。
 func WithFuncMap(o template.FuncMap) Option {
 	return func(g *GinTemp) {
+		if g.funcMap == nil {
+			g.funcMap = template.FuncMap{}
+		}
 		for k, v := range o {
 			g.funcMap[k] = v
 		}
@@ -70,6 +129,13 @@ func WithReload(enabled bool) Option {
 	}
 }
 
+// WithLogger 注入库日志输出，用于观察加载与热重载过程；默认静默。
+func WithLogger(l Logger) Option {
+	return func(g *GinTemp) {
+		g.logger = l
+	}
+}
+
 // layoutFunc 是 layout 指令的占位实现。
 // layout 在加载阶段已由 extractLayout 静态提取，
 // 渲染时该指令只需保留为空操作以便模板正常解析。
@@ -77,25 +143,25 @@ func layoutFunc(name string, data interface{}) string {
 	return ""
 }
 
+// NewGinTemp 按给定 Option 创建 GinTemp。
 func NewGinTemp(options ...Option) *GinTemp {
-	gintemp := &GinTemp{}
-	gintemp.TempPath = "./templates"
-	gintemp.viewDir = "views"
-	gintemp.layoutDir = "layouts"
-	gintemp.widgetDir = "widgets"
-	gintemp.ext = ".html"
-	gintemp.funcMap = template.FuncMap{
+	g := &GinTemp{}
+	g.tempPath = "./templates"
+	g.viewDir = "views"
+	g.layoutDir = "layouts"
+	g.widgetDir = "widgets"
+	g.ext = ".html"
+	g.defaultLayout = defaultLayoutName
+	g.funcMap = template.FuncMap{
 		"layout": layoutFunc,
 	}
 
 	for _, option := range options {
-		option(gintemp)
+		option(g)
 	}
 
-	return gintemp
+	return g
 }
-
-//
 
 // Load 加载模板并返回多模板渲染器。
 // 开启 WithReload 时返回的渲染器会在模板文件变化后自动重新加载。
@@ -114,6 +180,13 @@ func (g *GinTemp) Load() (multitemplate.Renderer, error) {
 	return &reloadRenderer{g: g, Renderer: r, modTime: modTime}, nil
 }
 
+// LoadTemplates 按给定 Option 加载模板并返回多模板渲染器，
+// 供 gin 的 r.HTMLRender 直接使用。
+func LoadTemplates(options ...Option) (multitemplate.Renderer, error) {
+	g := NewGinTemp(options...)
+	return g.Load()
+}
+
 // build 执行一次完整的模板加载
 func (g *GinTemp) build() (multitemplate.Renderer, error) {
 	// 使用静态 Render 而非 NewRenderer()：
@@ -121,11 +194,11 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 	// 其 Instance() 会对共享模板调用 Delims()，并发渲染存在数据竞争。
 	r := multitemplate.New()
 
-	widgets, err := g.loadFile(filepath.Join(g.TempPath, g.widgetDir))
+	widgets, err := g.loadFile(filepath.Join(g.tempPath, g.widgetDir))
 	if err != nil {
 		return nil, err
 	}
-	views, err := g.loadFile(filepath.Join(g.TempPath, g.viewDir))
+	views, err := g.loadFile(filepath.Join(g.tempPath, g.viewDir))
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +211,7 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 		}
 	}
 
-	viewRoot := filepath.Join(g.TempPath, g.viewDir)
+	viewRoot := filepath.Join(g.tempPath, g.viewDir)
 	for _, view := range views {
 
 		name, err := filepath.Rel(viewRoot, view)
@@ -151,14 +224,14 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read view %s: %w", view, err)
 		}
-		layoutName := defaultLayoutName
+		layoutName := g.defaultLayout
 		if v, ok := extractLayout(src); ok {
 			layoutName = v
 		}
 		if err := checkLayoutName(layoutName); err != nil {
 			return nil, fmt.Errorf("view %s: %w", name, err)
 		}
-		layoutPath := filepath.Join(g.TempPath, g.layoutDir, layoutName+g.ext)
+		layoutPath := filepath.Join(g.tempPath, g.layoutDir, layoutName+g.ext)
 
 		// 在共享 widgets 解析树的副本上解析 layout 与 view，
 		// 根模板为 layout，渲染时输出 layout 内容
@@ -171,7 +244,7 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 			return nil, fmt.Errorf("parse %s with layout %s: %w", view, layoutPath, err)
 		}
 		r.Add(name, tmpl)
-		log.Printf("template Load:%s,%s\n", name, layoutPath)
+		g.logf("template Load:%s,%s\n", name, layoutPath)
 	}
 	return r, nil
 }
@@ -193,7 +266,8 @@ func checkLayoutName(name string) error {
 	return nil
 }
 
-// 加载文件
+// loadFile 递归加载目录下扩展名匹配的模板文件，
+// 跳过以 skipPrefix 命名的文件与目录
 func (g *GinTemp) loadFile(dir string) ([]string, error) {
 
 	files, err := filepath.Glob(filepath.Join(dir, "*"))
@@ -202,6 +276,9 @@ func (g *GinTemp) loadFile(dir string) ([]string, error) {
 	}
 	cfiles := []string{}
 	for _, f := range files {
+		if g.skipPrefix != "" && strings.HasPrefix(filepath.Base(f), g.skipPrefix) {
+			continue
+		}
 		finfo, err := os.Stat(f)
 		if err != nil {
 			return nil, fmt.Errorf("stat %s: %w", f, err)
@@ -220,6 +297,13 @@ func (g *GinTemp) loadFile(dir string) ([]string, error) {
 
 	}
 	return cfiles, nil
+}
+
+// logf 输出日志；未注入 Logger 时静默
+func (g *GinTemp) logf(format string, args ...interface{}) {
+	if g.logger != nil {
+		g.logger.Printf(format, args...)
+	}
 }
 
 // reloadRenderer 开发期热重载渲染器：
@@ -243,7 +327,7 @@ func (rr *reloadRenderer) Instance(name string, data interface{}) render.Render 
 func (rr *reloadRenderer) reloadIfChanged() {
 	modTime, err := rr.g.latestModTime()
 	if err != nil {
-		log.Printf("gintemp: check template changes: %v", err)
+		rr.g.logf("gintemp: check template changes: %v", err)
 		return
 	}
 	rr.mu.RLock()
@@ -259,12 +343,12 @@ func (rr *reloadRenderer) reloadIfChanged() {
 	}
 	r, err := rr.g.build()
 	if err != nil {
-		log.Printf("gintemp: reload failed, keeping old templates: %v", err)
+		rr.g.logf("gintemp: reload failed, keeping old templates: %v", err)
 		return
 	}
 	rr.Renderer = r
 	rr.modTime = modTime
-	log.Printf("gintemp: templates reloaded\n")
+	rr.g.logf("gintemp: templates reloaded")
 }
 
 // latestModTime 返回模板目录（views/layouts/widgets）下所有文件与目录的最新修改时间，
@@ -272,9 +356,9 @@ func (rr *reloadRenderer) reloadIfChanged() {
 func (g *GinTemp) latestModTime() (time.Time, error) {
 	var latest time.Time
 	for _, dir := range []string{
-		filepath.Join(g.TempPath, g.viewDir),
-		filepath.Join(g.TempPath, g.layoutDir),
-		filepath.Join(g.TempPath, g.widgetDir),
+		filepath.Join(g.tempPath, g.viewDir),
+		filepath.Join(g.tempPath, g.layoutDir),
+		filepath.Join(g.tempPath, g.widgetDir),
 	} {
 		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -294,9 +378,4 @@ func (g *GinTemp) latestModTime() (time.Time, error) {
 		}
 	}
 	return latest, nil
-}
-
-func LoadTemplates(options ...Option) (multitemplate.Renderer, error) {
-	gintemp := NewGinTemp(options...)
-	return gintemp.Load()
 }

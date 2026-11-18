@@ -1,10 +1,19 @@
 gin layout template
 ---
+[![CI](https://github.com/zhangweidev/gintemp/actions/workflows/ci.yml/badge.svg)](https://github.com/zhangweidev/gintemp/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/zhangweidev/gintemp.svg)](https://pkg.go.dev/github.com/zhangweidev/gintemp)
+
 多模板加载
 为模板扩展 layout ，用于指定当前页面的模板
 
 虽然现在前端已经有了 Vue 、 React 等框架，但是使用模版有些时候可能是更好的解决方法。 
 如果用到模版来解决一些问题，可以尝试使用 `gintemp` 来管理模版。  
+
+## 安装
+
+```bash
+go get github.com/zhangweidev/gintemp
+```
 
 ## 页面组成
 - layout
@@ -23,7 +32,7 @@ gin layout template
 ## 例子 
 
 ```
-{{layout "layout" .}}}
+{{layout "layout" .}}
 {{define "title"}}首页{{end}}
 
 {{define "content"}}Hi, this is article template{{end}}
@@ -81,8 +90,25 @@ r.HTMLRender = renderer
 ```
 渲染时检测 `views` / `layouts` / `widgets` 目录的文件变化（mtime），变化后自动重新加载；重新加载失败（如模板写错）时继续使用旧模板并输出日志，修好后自动恢复。生产环境建议关闭。
 
-## isuse
+## 配置选项
+
+| Option | 说明 | 默认 |
+|--------|------|------|
+| `WithTempPath` | 模板根路径 | `./templates` |
+| `WithViewDir` / `WithLayoutDir` / `WithWidgetDir` | 三个子目录名 | `views` / `layouts` / `widgets` |
+| `WithExt` | 模板扩展名 | `.html` |
+| `WithDefaultLayout` | 未写 layout 指令时的默认 layout 名 | `layout` |
+| `WithSkipPrefix` | 跳过该前缀命名的文件/目录（如片段文件 `_partial.html`） | 不跳过 |
+| `WithFuncMap` | 注入自定义模板函数 | — |
+| `WithReload` | 开发期热重载 | 关闭 |
+| `WithLogger` | 注入日志输出 | 静默 |
+
+## 常见问题
 - 渲染时报 `no such template "xxxxx"`：模版中引用了某个定义未实现 ,检查模版中 define 是否实现
 
 layout 指令（如 `{{layout "layout" .}}`）在模板加载时静态提取，不再预执行模板，加载期不会出现 `no such template` 类报错。
+
+## License
+
+[MIT](LICENSE)
  
