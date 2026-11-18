@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/gin-contrib/multitemplate"
@@ -72,31 +73,32 @@ func TestCheckLayoutName(t *testing.T) {
 }
 
 func TestLoadFileRecursionAndExtFilter(t *testing.T) {
-	g := NewGinTemp(WithTempPath("testdata"))
+	g := NewGinTemp(WithTempPath(testdataPath))
+	fsys := rootFSOf(t, g)
 
-	got, err := g.loadFile(filepath.Join(testdataPath, "views"))
+	got, err := g.loadFile(fsys, "views")
 	if err != nil {
 		t.Fatal(err)
 	}
 	sort.Strings(got)
 	want := []string{
-		filepath.Join(testdataPath, "views", "auth", "login.html"),
-		filepath.Join(testdataPath, "views", "home", "index.html"),
-		filepath.Join(testdataPath, "views", "plain.html"),
+		"views/auth/login.html",
+		"views/home/index.html",
+		"views/plain.html",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("loadFile(views) = %v, want %v", got, want)
 	}
 
 	// 扩展名过滤：note.txt 不应被加载
-	got, err = g.loadFile(filepath.Join(testdataPath, "widgets"))
+	got, err = g.loadFile(fsys, "widgets")
 	if err != nil {
 		t.Fatal(err)
 	}
 	sort.Strings(got)
 	want = []string{
-		filepath.Join(testdataPath, "widgets", "footer.html"),
-		filepath.Join(testdataPath, "widgets", "header.html"),
+		"widgets/footer.html",
+		"widgets/header.html",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("loadFile(widgets) = %v, want %v", got, want)
@@ -104,8 +106,8 @@ func TestLoadFileRecursionAndExtFilter(t *testing.T) {
 }
 
 func TestLoadFileMissingDir(t *testing.T) {
-	g := NewGinTemp()
-	got, err := g.loadFile(filepath.Join("testdata", "not-exist"))
+	g := NewGinTemp(WithTempPath(testdataPath))
+	got, err := g.loadFile(rootFSOf(t, g), "not-exist")
 	if err != nil {
 		t.Fatalf("missing dir should not error: %v", err)
 	}
@@ -121,12 +123,11 @@ func TestLoadFileSpecialCharDir(t *testing.T) {
 	writeTemplate(t, dir, "views/[draft]/v.html", `{{define "content"}}X{{end}}`)
 
 	g := NewGinTemp(WithTempPath(dir))
-	root := filepath.Join(dir, "views", "[draft]")
-	got, err := g.loadFile(root)
+	got, err := g.loadFile(rootFSOf(t, g), filepath.Join("views", "[draft]"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{filepath.Join(root, "v.html")}
+	want := []string{"views/[draft]/v.html"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("loadFile(views/[draft]) = %v, want %v", got, want)
 	}
@@ -523,5 +524,74 @@ func writeTemplate(t *testing.T, root, rel, content string) {
 	}
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// rootFSOf 返回 GinTemp 解析出的模板根文件系统
+func rootFSOf(t *testing.T, g *GinTemp) fs.FS {
+	t.Helper()
+	fsys, err := g.rootFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fsys
+}
+
+func TestWithFS(t *testing.T) {
+	// go:embed 场景：FS 内路径带 "templates/" 前缀，默认 tempPath 即可命中
+	fsys := fstest.MapFS{
+		"templates/layouts/layout.html": {Data: []byte(`L[{{template "content" .}}]`)},
+		"templates/views/v.html":        {Data: []byte(`{{layout "layout" .}}{{define "content"}}FS-OK{{end}}`)},
+	}
+	r, err := LoadTemplates(WithFS(fsys))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "L[FS-OK]") {
+		t.Fatalf("WithFS render wrong:\n%s", out)
+	}
+}
+
+func TestWithFSSubPathAndFuncs(t *testing.T) {
+	// tempPath 指定 FS 内子目录；widgets、funcMap、渲染名与宿主文件系统模式一致
+	fsys := fstest.MapFS{
+		"tpl/layouts/layout.html": {Data: []byte(`[{{template "widgets/header" .}}{{template "content" .}}]`)},
+		"tpl/views/sub/v.html":    {Data: []byte(`{{layout "layout" .}}{{define "content"}}{{add 1 2}}{{end}}`)},
+		"tpl/widgets/header.html": {Data: []byte(`{{define "widgets/header"}}H{{end}}`)},
+	}
+	r, err := LoadTemplates(
+		WithFS(fsys),
+		WithTempPath("tpl"),
+		WithFuncMap(template.FuncMap{"add": func(x, y int) int { return x + y }}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := renderWith(t, r, "sub/v.html"); !strings.Contains(out, "[H3]") {
+		t.Fatalf("WithFS sub path render wrong:\n%s", out)
+	}
+}
+
+func TestWithFSRootPath(t *testing.T) {
+	// tempPath 为 "." 时以 FS 根为模板根
+	fsys := fstest.MapFS{
+		"layouts/layout.html": {Data: []byte(`A[{{template "content" .}}]`)},
+		"views/v.html":        {Data: []byte(`{{define "content"}}ROOT{{end}}`)},
+	}
+	r, err := LoadTemplates(WithFS(fsys), WithTempPath("."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := renderWith(t, r, "v.html"); !strings.Contains(out, "A[ROOT]") {
+		t.Fatalf("WithFS root path render wrong:\n%s", out)
+	}
+}
+
+func TestWithFSMissingLayoutReturnsError(t *testing.T) {
+	fsys := fstest.MapFS{
+		"views/v.html": {Data: []byte(`{{layout "nope" .}}{{define "content"}}x{{end}}`)},
+	}
+	if _, err := LoadTemplates(WithFS(fsys), WithTempPath(".")); err == nil {
+		t.Fatal("want error for missing layout in fs, got nil")
 	}
 }

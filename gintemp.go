@@ -6,13 +6,17 @@
 //	{{layout "layout" .}}
 //
 // 该指令在模板加载时静态提取，渲染时为空操作。
+// 模板可从宿主文件系统加载（WithTempPath），也可从任意 fs.FS
+// （如 go:embed）加载（WithFS）。
 package gintemp
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -38,7 +42,7 @@ type Logger interface {
 // GinTemp 管理模板目录约定（views/layouts/widgets）、layout 探测与渲染器加载，
 // 通过 NewGinTemp 创建、Option 配置。
 type GinTemp struct {
-	tempPath      string           // 模板根路径
+	tempPath      string           // 模板根路径：宿主目录，或 WithFS 时 FS 内的子目录
 	viewDir       string           // 视图文件夹
 	layoutDir     string           // 布局文件夹
 	widgetDir     string           // 组件文件夹
@@ -48,12 +52,14 @@ type GinTemp struct {
 	reload        bool             // 开发期热重载
 	logger        Logger           // 日志输出，nil 表示静默
 	funcMap       template.FuncMap // 注入的模板函数
+	fsys          fs.FS            // 非 nil 时从该 FS 加载模板（如 go:embed）
 }
 
 // Option 用于配置 GinTemp。
 type Option func(*GinTemp)
 
-// WithTempPath 设置模板根路径，默认 "./templates"。
+// WithTempPath 设置模板根路径，默认 "./templates"；
+// 与 WithFS 同时使用时，表示 FS 内的子目录（如 "templates"），"." 表示 FS 根。
 func WithTempPath(path string) Option {
 	return func(g *GinTemp) {
 		g.tempPath = path
@@ -122,7 +128,7 @@ func WithFuncMap(o template.FuncMap) Option {
 // WithReload 开启开发期热重载：
 // 模板文件（views/layouts/widgets）发生变化后，渲染时自动重新加载，
 // 无需重启进程；重新加载失败时继续使用旧模板并输出日志。
-// 生产环境建议关闭。
+// 生产环境建议关闭。注意：fs.FS（如 go:embed）内容不可变，无需开启。
 func WithReload(enabled bool) Option {
 	return func(g *GinTemp) {
 		g.reload = enabled
@@ -133,6 +139,15 @@ func WithReload(enabled bool) Option {
 func WithLogger(l Logger) Option {
 	return func(g *GinTemp) {
 		g.logger = l
+	}
+}
+
+// WithFS 从任意 fs.FS 加载模板（如 go:embed 的 embed.FS），
+// 实现模板随二进制单文件部署。tempPath 解释为 FS 内的子目录（默认 "./templates"），
+// 目录结构约定（views/layouts/widgets）与宿主文件系统模式一致。
+func WithFS(fsys fs.FS) Option {
+	return func(g *GinTemp) {
+		g.fsys = fsys
 	}
 }
 
@@ -187,6 +202,20 @@ func LoadTemplates(options ...Option) (multitemplate.Renderer, error) {
 	return g.Load()
 }
 
+// rootFS 返回模板根目录对应的文件系统：
+// 未设置 WithFS 时为宿主文件系统的 tempPath 目录；
+// 设置 WithFS 时为 fsys 内 tempPath 子目录（tempPath 用斜杠分隔，"." 表示 fsys 根）。
+func (g *GinTemp) rootFS() (fs.FS, error) {
+	if g.fsys == nil {
+		return os.DirFS(g.tempPath), nil
+	}
+	sub := path.Clean(filepath.ToSlash(g.tempPath))
+	if sub == "." {
+		return g.fsys, nil
+	}
+	return fs.Sub(g.fsys, sub)
+}
+
 // build 执行一次完整的模板加载
 func (g *GinTemp) build() (multitemplate.Renderer, error) {
 	// 使用静态 Render 而非 NewRenderer()：
@@ -194,11 +223,16 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 	// 其 Instance() 会对共享模板调用 Delims()，并发渲染存在数据竞争。
 	r := multitemplate.New()
 
-	widgets, err := g.loadFile(filepath.Join(g.tempPath, g.widgetDir))
+	root, err := g.rootFS()
+	if err != nil {
+		return nil, fmt.Errorf("template root: %w", err)
+	}
+
+	widgets, err := g.loadFile(root, g.widgetDir)
 	if err != nil {
 		return nil, err
 	}
-	views, err := g.loadFile(filepath.Join(g.tempPath, g.viewDir))
+	views, err := g.loadFile(root, g.viewDir)
 	if err != nil {
 		return nil, err
 	}
@@ -206,23 +240,16 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 	// widgets 只解析一次，各 view 通过 Clone 共享解析树
 	base := template.New("widgets").Funcs(g.funcMap)
 	if len(widgets) > 0 {
-		if _, err := base.ParseFiles(widgets...); err != nil {
+		if _, err := parseTemplateFiles(base, root, widgets); err != nil {
 			return nil, fmt.Errorf("parse widgets: %w", err)
 		}
 	}
 
-	viewRoot := filepath.Join(g.tempPath, g.viewDir)
 	for _, view := range views {
-
-		name, err := filepath.Rel(viewRoot, view)
-		if err != nil {
-			return nil, fmt.Errorf("resolve view name %s: %w", view, err)
-		}
-		// 模板名统一使用斜杠，保证 Windows 下与调用方 c.HTML("auth/login.html", ...) 一致
-		name = filepath.ToSlash(name)
+		name := relName(g.viewDir, view)
 
 		// 静态提取 layout 指令（替代旧的"预执行模板 + 副作用写 map"探测）
-		src, err := os.ReadFile(view)
+		src, err := fs.ReadFile(root, view)
 		if err != nil {
 			return nil, fmt.Errorf("read view %s: %w", view, err)
 		}
@@ -233,10 +260,11 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 		if err := checkLayoutName(layoutName); err != nil {
 			return nil, fmt.Errorf("view %s: %w", name, err)
 		}
-		layoutPath := filepath.Join(g.tempPath, g.layoutDir, layoutName+g.ext)
+		layoutPath := path.Join(filepath.ToSlash(g.layoutDir), layoutName+g.ext)
+
 		// 同名文件会互相覆盖解析树（后解析的顶掉 layout 根模板），加载期直接报错
-		if filepath.Base(layoutPath) == filepath.Base(view) {
-			return nil, fmt.Errorf("view %s: layout %s has the same file name %q, rename one of them to avoid template name collision", name, layoutPath, filepath.Base(view))
+		if path.Base(layoutPath) == path.Base(view) {
+			return nil, fmt.Errorf("view %s: layout %s has the same file name %q, rename one of them to avoid template name collision", name, layoutPath, path.Base(view))
 		}
 
 		// 在共享 widgets 解析树的副本上解析 layout 与 view，
@@ -245,14 +273,46 @@ func (g *GinTemp) build() (multitemplate.Renderer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("clone widgets for %s: %w", view, err)
 		}
-		tmpl, err = tmpl.New(filepath.Base(layoutPath)).ParseFiles(layoutPath, view)
-		if err != nil {
+		rootTmpl := tmpl.New(path.Base(layoutPath))
+		if _, err := parseTemplateFiles(rootTmpl, root, []string{layoutPath, view}); err != nil {
 			return nil, fmt.Errorf("parse %s with layout %s: %w", view, layoutPath, err)
 		}
-		r.Add(name, tmpl)
+		r.Add(name, rootTmpl)
 		g.logf("template Load:%s,%s\n", name, layoutPath)
 	}
 	return r, nil
+}
+
+// parseTemplateFiles 将 files 依次解析进 t 的模板集合，语义与
+// template.Template.ParseFiles 一致：模板以文件 base name 命名；
+// 与 t 同名的文件内容进入 t 本身，其余文件各自成为关联模板。
+// 相比 ParseFiles 直接读取 fs.FS，且不把文件名当 glob 模式处理。
+func parseTemplateFiles(t *template.Template, fsys fs.FS, files []string) (*template.Template, error) {
+	for _, f := range files {
+		b, err := fs.ReadFile(fsys, f)
+		if err != nil {
+			return nil, err
+		}
+		name := path.Base(f)
+		tmpl := t
+		if name != t.Name() {
+			tmpl = t.New(name)
+		}
+		if _, err := tmpl.Parse(string(b)); err != nil {
+			return nil, err
+		}
+	}
+	return t, nil
+}
+
+// relName 返回模板文件 p 相对目录 dir 的模板名（统一使用斜杠分隔），
+// 作为渲染时 c.HTML(name, ...) 的注册键。
+func relName(dir, p string) string {
+	dir = strings.TrimSuffix(path.Clean(filepath.ToSlash(dir)), "/")
+	if dir == "." {
+		return p
+	}
+	return strings.TrimPrefix(p, dir+"/")
 }
 
 // extractLayout 从模板源码中静态提取 layout 指令指定的模版名称
@@ -272,13 +332,14 @@ func checkLayoutName(name string) error {
 	return nil
 }
 
-// loadFile 递归加载目录下扩展名匹配的模板文件，
-// 跳过以 skipPrefix 命名的文件与目录；目录不存在时返回空列表。
-// 使用 os.ReadDir 而非 Glob，目录名含 [ ] 等特殊字符时也能正确遍历。
-func (g *GinTemp) loadFile(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+// loadFile 递归列出目录下扩展名匹配的模板文件，
+// 返回相对模板根的斜杠路径；跳过以 skipPrefix 命名的文件与目录；
+// 目录不存在时返回空列表。
+func (g *GinTemp) loadFile(fsys fs.FS, dir string) ([]string, error) {
+	dir = filepath.ToSlash(dir)
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read dir %s: %w", dir, err)
@@ -288,17 +349,17 @@ func (g *GinTemp) loadFile(dir string) ([]string, error) {
 		if g.skipPrefix != "" && strings.HasPrefix(e.Name(), g.skipPrefix) {
 			continue
 		}
-		f := filepath.Join(dir, e.Name())
+		p := path.Join(dir, e.Name())
 		if e.IsDir() {
-			childFiles, err := g.loadFile(f)
+			childFiles, err := g.loadFile(fsys, p)
 			if err != nil {
 				return nil, err
 			}
 			files = append(files, childFiles...)
 			continue
 		}
-		if filepath.Ext(e.Name()) == g.ext {
-			files = append(files, f)
+		if path.Ext(e.Name()) == g.ext {
+			files = append(files, p)
 		}
 	}
 	return files, nil
@@ -359,13 +420,13 @@ func (rr *reloadRenderer) reloadIfChanged() {
 // latestModTime 返回模板目录（views/layouts/widgets）下所有文件与目录的最新修改时间，
 // 文件新增/删除会更新父目录 mtime，因此也能被检测到
 func (g *GinTemp) latestModTime() (time.Time, error) {
+	root, err := g.rootFS()
+	if err != nil {
+		return time.Time{}, err
+	}
 	var latest time.Time
-	for _, dir := range []string{
-		filepath.Join(g.tempPath, g.viewDir),
-		filepath.Join(g.tempPath, g.layoutDir),
-		filepath.Join(g.tempPath, g.widgetDir),
-	} {
-		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	for _, dir := range []string{g.viewDir, g.layoutDir, g.widgetDir} {
+		err := fs.WalkDir(root, filepath.ToSlash(dir), func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -378,7 +439,7 @@ func (g *GinTemp) latestModTime() (time.Time, error) {
 			}
 			return nil
 		})
-		if err != nil && !os.IsNotExist(err) {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return time.Time{}, err
 		}
 	}
